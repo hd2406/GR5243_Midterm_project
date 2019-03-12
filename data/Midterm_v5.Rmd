@@ -1,0 +1,454 @@
+---
+title: "Applied Data Science:  Midterm Project"
+author: "Rachel Wu, Haokun Dong, Jack Chen"
+date: "Mar 14, 2019"
+output:
+  prettydoc::html_pretty:
+  theme: cayman
+highlight: github
+---
+
+```{r setup, include=FALSE}
+set.seed(72)
+knitr::opts_chunk$set(echo = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55))
+```
+
+```{r libraries, echo = FALSE}
+library(data.table)
+library(DT)
+library(Formula)
+library(glmnet)
+library(caret)
+library(dplyr)
+library(randomForest)
+library(nnet)
+library(class)
+library(rpart)
+library(e1071)
+library(gbm)
+library(dplyr)
+library(MASS)
+library(klaR)
+```
+
+```{r source_files}
+
+```
+
+## 1. Introduction
+
+This project will focus on generating various predictive classifications regarding an image recognition problem. Data for this project came from the MNIST Fashion database (https://github.com/zalandoresearch/fashion-mnist), which contained a large number of images for different types of apparel. In order to proceed the problem, data were divided into a training set (with 60,000 rows), and a testing set (with 10,000 rows). 
+
+The main goal for this project is to determine the best machine learning models for classifying the types of apparel of the testing set based upon the data of the training set. In order to achieve this goal, we will be building and assessing the
+performances of the following 10 models:
+
+* Multinomial Logistic Regression
+* K-Nearest Neighbors with K=5
+* Classification Tree
+* Random Forest
+* SVM
+* Linear Discriminant Analysis
+* Partial Least Squares Regression
+* Naive Bayes
+* Neural Networks
+* An ensembling model using other models' predictions as inputs
+
+
+## 2. Evaluation of Models
+As we go through this project, we will be able to answer how small of a sample size  we need to generate the “best” predictions, and the amount of time it takes for the computer to get to the optimal results. One way to quantify the performance of each classification model is to introduce a scoring function: 
+$$Points = 0.25 * A + 0.25 * B + 0.5 * C$$, where A is the sample size proportion, B is the running time, and C represents the misclassification rate. The ultimate goal is to build a classification method that would minimizes Points.
+
+We will further divide the whole training set into 3 different sample sizes (500, 1000, 2000), and for each sample size we will randomly sample 3 data sets, resulting in a total number of 9 training sets. From there, we will evaluate each model's performance over the 9 training sets. 
+
+
+Due to the fact that we will be building models and fitting them on 9 data sets, which could potentially take a lot amount of running time, we decide to develop functions to proceed all of our work in a relatively small number of processing function in order to simply our work. Below show the main functions we use for this project besides our modelling functions, including:
+
+* Sampling function: generates the 9 iterations/data sets
+* Iteration function: runs through the 9 iterations/data sets of a single model
+* Scoring function: computes the results for a model at a given sample size
+* Scoring summary function: aggregates the 90 modeling results into 30 rows of information, one for each unique pair of a model and a sample size.
+* Reporting function: displays the final results
+
+```{r functions}
+get_image <- function(x) {image(
+         matrix(unlist(train[x,-1]),ncol = 7,byrow = T),
+         col=cm.colors(255),    # Select 255 grey levels
+         axes = FALSE
+       )
+}
+
+
+
+create.formula <- function(outcome.name, input.names, input.patterns = NA,all.data.names = NA, return.as = "character") {
+
+  variable.names.from.patterns <- c()
+  if (!is.na(input.patterns[1]) & !is.na(all.data.names[1])) {
+    pattern <- paste(input.patterns, collapse = "|")
+    variable.names.from.patterns <- all.data.names[grep(pattern = pattern,
+    x = all.data.names)]  
+  }
+  
+  all.input.names <- unique(c(input.names, variable.names.from.patterns))
+  all.input.names <- all.input.names[all.input.names !=outcome.name]
+
+  if (!is.na(all.data.names[1])) {
+    all.input.names <- all.input.names[all.input.names %in%
+    all.data.names]
+   }
+
+  input.names.delineated <- sprintf("`%s`", all.input.names)
+  the.formula <- sprintf("`%s` ~ %s", outcome.name, paste(input.names.delineated,collapse = " + "))
+  
+  if (return.as == "formula") {
+     return(as.formula(the.formula))
+  }
+  
+  if (return.as != "formula") {
+     return(the.formula)
+  }
+}
+
+
+create.x.and.y <- function(the.formula, data) {
+   require(data.table)
+   setDT(data)
+   x <- model.matrix(object = as.formula(the.formula),data = data)
+   y.name <- trimws(x = gsub(pattern = "`", replacement = "",
+   x = strsplit(x = the.formula, split = "~")[[1]][1],fixed = TRUE))
+   y <- data[as.numeric(rownames(x)), get(y.name)]
+  return(list(x = x, y = y))
+}
+
+# scoring function
+score <- function(data,function_name,i)
+{
+  FUN <- match.fun(function_name) 
+  
+  start_time <- as.numeric(Sys.time())
+  mod <- FUN(data)
+  end_time <- as.numeric(Sys.time())
+  
+  size = nrow(data)
+  
+  A = size/nrow(train)
+  
+  B = min(1,(end_time - start_time)/60)
+
+  C = mod$'C'
+  
+  return(data.table("Model"=paste("Model",i,sep=" "),'Sample size'=size,Data=deparse(substitute(data)),A=round(A,4),B=round(B,4),
+                    C=round(C,4),Points=round(0.25 * A + 0.25 * B + 0.5 * C,4)))
+}
+
+# iteration function
+iteration_fun<-function(model,i){
+ return(rbind(score(dat_500_1,model,i),
+   score(dat_500_2,model,i),
+   score(dat_500_3,model,i),
+   score(dat_1000_1,model,i),
+   score(dat_1000_2,model,i),
+   score(dat_1000_3,model,i),
+   score(dat_2000_1,model,i),
+   score(dat_2000_2,model,i),
+   score(dat_2000_3,model,i)))
+}
+
+# scoring summary function
+score_summary<-function(fun){
+  FUN <- match.fun(fun)
+  alldata<-rbind(
+    FUN(Multinomial_logistic_regression,1),
+    FUN(K_Nearest_Neighbors5,2) ,
+    FUN(Classification_Tree,3) ,
+    FUN(Random_Forest,4),
+    FUN(Support_Vector_Machines,5) ,
+    FUN(Linear_Discriminant_Analysis,6),
+    FUN(Partial_Least_Squares,7) ,
+    FUN(nb,8),
+    FUN(nn,9),
+    FUN(Ensembling,10))
+  
+  alldata2<-alldata[,list(A=round(mean(A),4),B=round(mean(B),4),
+C=round(mean(C),4),Points=round(mean(Points),4)),by=c("Model","`Sample size`")]
+  
+   return(alldata2)
+}
+
+# reporting function
+reporting<-function(data){
+  return(data.table(data[order(Points),]))
+}
+```
+
+```{r constants}
+n.values <- c(500, 1000, 2000)
+iterations <- 3
+```
+
+```{r load_data}
+train <- fread("MNIST-fashion training set-49.csv")
+test <- fread("MNIST-fashion testing set-49.csv")
+```
+
+```{r clean_data}
+train[,2:50] <-  train[,2:50]/255
+test[,2:50] <- test[,2:50]/255
+
+
+train$label <- as.factor(train$label) #change characters to factors
+test$label <- as.factor(test$label)
+
+
+input.names <- names(test)[-1]
+output.name <- names(test)[1]
+formula <- create.formula(outcome.name = output.name, input.names = input.names)
+```
+
+```{r generate_samples}
+# sampling
+for (i in 1:iterations)
+{
+  for (j in n.values)
+  {
+    nam <- paste("dat", j,i, sep = "_")
+    assign(nam, sample_n(train, j))
+
+  }
+}
+```
+
+## 3. Building Models
+
+After we finish preparing our data and developing some basic functions, it's time to build all the 10 models to evaluate their classification abilities. 
+
+### Model 1:  Multinomial logistic regression
+
+Given the fact that our response variable is a categorical variable with more than two classes, we first consider the multinomial logistic regression, which generalizes the logistic regression to multiclass problems. This model is used to predict the probabilities of having different possible classes given the data. 
+
+The advantages of a multinomial logistic regression include, for example: it may handle non-linear effects; it does not assume a linear relationship between the predictors and the response; it deals pretty well with multiclass problems. However, these benefits also come with a cost: in general, the multinomial logistic regression requires more data to achieve meaningful results; in addition, it may impose constraint on the relative preferences between the different alternatives.
+
+```{r code_model1_development, eval = TRUE}
+Multinomial_logistic_regression <- function(data){
+  mod <- multinom(formula,data = data, trace=FALSE)
+  pred <- predict(object = mod, newdata = test[,2:50])
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Model'=NA,'Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model1}
+iteration_fun(Multinomial_logistic_regression,1)
+```
+
+### Model 2: K(5)-Nearest Neighbors 
+
+Our second model is the K-nearest Neighbors with K=5. We select K=5 because we think kNN usually performs pretty well when K=5 based on our past experiences. To classify the new data point, kNN scans through the whole data set to find out K=5 nearest neighbors. 
+
+As we can see, this machine learning technique is pretty simple and intuitive. It is a non-parametric technique meaning it does not have prior assumptions regarding the data. We can also implement it easily for multi-class problems without extra efforts. However, we must admit that it also has several shortcomings, and one of which is as the numbers of variables grow kNN usually struggles to predict the output. In addition, it is also sensitive to outliers due to its classification technique. 
+
+```{r code_model2_development, eval = TRUE}
+K_Nearest_Neighbors5 <- function(data,k=5)
+{
+  pred <- knn(data[,2:50],test = test[,2:50],cl=data$label,k=k)
+  C = 1-sum(test$label==pred)/nrow(test)
+   return(list('Model'="Model 1",'Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model2}
+iteration_fun(K_Nearest_Neighbors5,2)
+```
+
+
+
+### Model 3:  Classification Tree
+
+Our third model is the classification tree, which is also a non-parametric technique. We do not want to specify the tree depth so we only use all the default values at this time. The basic idea behind a classification tree is that for each internal node, it specifies some thresholds for a certain variable, and if the new data point has a variable value that belongs to the range, the new data point will be classified into a certain type of class.
+
+It's usually good for visualizations because it's simple to understand and interpret. One advantage of a classification tree is that it performs well with large data. However, it also has some limitations. For example, very often, as we grow the trees it's possible have overfitting issues. Also, a small change in the training data can lead to a huge change in the tree and consequently the final predictions, and sometimes it's possible to create trees that are too complex and do not generalize well from the training data. 
+
+```{r code_model3_development, eval = TRUE}
+Classification_Tree <- function(data)
+{
+  mod <- rpart(formula,data = data,method = "class")
+  pred=predict(object = mod, newdata = test[,2:50],type = "class")
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Model'=mod,'Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model3}
+iteration_fun(Classification_Tree,3)
+```
+
+
+### Model 4: Random_Forest
+
+We then perform the random forest model. For the parameters, we decide to use both the default values for ntree(=500), and mtry (the default is the square root of the number of predictor variables rounded down). Random forests model is an ensemble learning method for classification that operates by developing a bunch of decision trees using training data. Random forests correct for decision trees' habit of overfitting to their training set, and the computational cost of training the random forest is quite low. Another advantage of random forests is that it can take a relatively small number of samples and get pretty good results. However, the random forests will quickly reach a point where more samples will not improve the accuracy.
+
+```{r code_model4_development, eval = TRUE}
+Random_Forest <- function(data)
+{
+  mod <- randomForest(formula =data$label~.,data=data,ntree=500)
+  pred <- predict(object = mod, newdata = test[,2:50])
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Model'=mod,'Prediction'=pred,'C'=C))
+
+}
+
+```
+
+```{r load_model4}
+iteration_fun(Random_Forest,4)
+```
+
+### Model 5: SVM
+
+Then we move on to a support vector machines model. Given a set of training examples, each marked as belonging to one or the other of two categories, the SVM algorithm builds a model that assigns new examples to one category or the other, making it a non-probabilistic binary linear classifier. New examples are then mapped into that same space and predicted to belong to a category based on which side of the gap they fall. In general, SVMs can efficiently perform a non-linear classification using the kernel trick. We do not specifically pick the parameters and decide to use the defaults (cost=1).  Using the SVM, the results usually have high accuracy and nice theoretical guarantees regarding overfitting.
+
+```{r code_model5_development, eval = TRUE}
+Support_Vector_Machines <- function(data)
+{
+  mod <- svm(data[,2:50],data$label)
+  pred <- predict(mod,test[,2:50])
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Model'=mod,'Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model5}
+iteration_fun(Support_Vector_Machines,5)
+```
+
+### Model 6: Linear Discriminant Analysis
+
+A linear discriminant analysis is then performed. It models the distribution of predictors separately in each of the response classes, and then it uses Bayes’ theorem to estimate the probability, and it uses a linear boundary to classify data points. Therefore, if the true boundary is non-linear, then the LDA may not perform well. In addition, LDA is more suitable for smaller data sets, it has a higher bias, and a lower variance, and it classified ungrouped cases as well. 
+
+
+```{r code_model6_development, eval = TRUE}
+Linear_Discriminant_Analysis <- function(data)
+{
+  mod <- lda(label~., data=data)
+  predictions <- predict(mod, test[,2:50])
+  pred <- predictions$class
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Model'=mod,'Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model6}
+iteration_fun(Linear_Discriminant_Analysis,6)
+```
+
+### Model 7: Partial Least Squares Discriminant Analysis
+
+We also consider the partial least squares model. It finds a linear regression model by projecting the predicted variables and the observable variables to a new space. PLS is well-performed when the predictors has more variables than observations, and when there is multicollinearity among the predictors, and thus can provide more predictive accuracy and a much lower risk of chance correlation. However, one major disadvantage of PLS is that it may have a higher risk of overlooking ‘real’ correlations and sensitivity to the relative scaling of the descriptor variables.
+
+
+```{r code_model7_development, eval = TRUE}
+Partial_Least_Squares <- function(data)
+{
+  mod <- plsda(data[,2:50], data$label, probMethod="Bayes")
+  pred <- predict(mod, test[,2:50])
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Model'=mod,'Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model7}
+iteration_fun(Partial_Least_Squares,7)
+```
+
+### Model 8: Naive Bayes
+
+Our 8th model is the Naive Bayes model. One main advantage of Naive Bayes is that the algorithm is really simple and it runs fast. If the Naive Bayes conditional independence assumption actually holds, a Naive Bayes classifier will converge quicker than discriminative models such as logistic regression. As a result, we don't require large training data. And even if the Naive Bayes assumption doesn’t hold, a Naive Bayes classifier still often does a great job in practice. On the other hand, its main shortcoming is that it can’t learn interactions between features, so if there is actually interaction effects, we need to consider other models. 
+
+
+```{r code_model8_development, eval = TRUE}
+nb <- function(data)
+{
+  mod <- naiveBayes(label~., data=data)
+  pred <- predict(mod, test[,2:50])
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Model'=mod,'Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model8}
+iteration_fun(nb,8)
+```
+
+### Model 9: Neural Networks
+
+Next, we perform the neural networks technique. It will benefit from massive amounts of data, and continuously improve the accuracy. It's excellent in extracting patterns and detecting trends as well.
+
+The main advantage of Neural Network lies in their ability to outperform nearly every other Machine Learning algorithms, but this goes along with some disadvantages as well. Usually, it requires much more data than traditional Machine Learning algorithms. When our sample size is relatively small, performing another technique, such as the Naive Bayes, may lead to a faster and simpler outcome. We also need to admit that Neural Networks are more computationally expensive than traditional algorithms because it's essentially combining many different machine learning algorithms. 
+
+```{r code_model9_development, eval = TRUE}
+nn <- function(data)
+{
+  mod <- nnet(label ~ ., data = data, size = 2, rang = 0.1,decay = 5e-4, maxit = 200, trace =F)
+  pred <- predict(mod, test[,-1], type = "class")
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Model'=mod,'Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model9}
+iteration_fun(nn,9)
+```
+
+
+### Model 10: Ensembling Model
+
+After discussing the advantages and disadvantages of the above 9 machine learning models, we realize that there is no perfect Machine Learning algorithm that will perform well at any problem. For every problem, a certain method is suited and achieves good results while another method fails heavily. Therefore, it is more important to think of a meaningful way to combine results, and to ensure the quality of the data in order to capture more information. To do so, we decide to build an ensembling model, which combines the results of the 3 selected models: multinomial logistic regression, random forests, and kNN (K=5). For this model, the predictions from the other selected models will be the inputs, meaning that we will be averaging the predictions from all the other 3 algorithms. We hope by doing so, we would be able to average out the disadvantages of the models. 
+
+
+```{r code_model10_development, eval = TRUE}
+most_count <- function(x){
+    t <- table(unlist(x))
+    return(names(t[which.max(t)]))
+}
+
+Ensembling <- function(dat) {
+  pred1 <- Multinomial_logistic_regression(dat)$"Prediction"
+  pred2 <- K_Nearest_Neighbors5(dat)$"Prediction"
+  pred3 <- Random_Forest(dat)$"Prediction"
+  dat.pred <- data.table(pred1,pred2,pred3)
+  pred <- apply(dat.pred,1,most_count)
+  C = 1-sum(test$label==pred)/nrow(test)
+  return(list('Prediction'=pred,'C'=C))
+}
+```
+
+```{r load_model10}
+iteration_fun(Ensembling,10)
+```
+
+
+## Scoreboard
+
+```{r scoreboard}
+reporting(score_summary(iteration_fun))
+```
+
+## Discussion
+
+* As shown in the scoreboard, after we run all the 10 models using the 9 iterations, the model with the lowest Point value is model 4 (random forests) with sample size 2000, followed by SVM with sample size 2000, SVM with sample size 1000. The top three models that perform pretty well in this project are SVM, random forests, and the kNN (K=5). In addiditon, model 10 (ensembling model) is ranked 10th in terms of the Point value, this may due to the fact that we conlude the multinomial logistic regression in the ensembling model and it does not outperform other models at this time. It's also interesting to see that in general, all the models perform pretty well using sample sizes 2000 and 1000, which makes sense because these sample sizes carry more information about the data. 
+
+* If we focus on the running time for the top 5 models, we notice that the running time for model 1 (multinomial logistic regression) is the lowest among all. This makes sense because it's a relatively simple model. Models such as random forests is itself an ensembling model, so it may take more time to run the random forests. Random forests and SVM also generate relatively small test misclassification error rates among all models. So in general, we see a trade-off between sample size, running time, and test misclassification rates. 
+
+* Throughout this project, we are able to learn new machine learning techniques, sharpen our technical skills, and are more comfortable with writing functions. Overall, we've learned that the random forest performs the best in this classification problem, and we think the main reason is that itself is a ensembling model, so it's combining the benefits of the classification models. In addition, there's always a trade-off between the running time, sample size, and test misclassification rate, but it really depends on what we want in the end. If our ultimate goal is to generate a model with the lowest misclassification rate, then we may focus more on the random forests. On the other hand, if our goal is to get the lowest running time, then we should focus more on the multinomial logistic regression. There is probably no best model when we approach this kind of problem, and we think the most important thing is to come up with a way to combine the results so that we can capture more information of the data. 
+
+
+
+## References
+https://victorfang.wordpress.com/2011/05/10/advantages-and-disadvantages-of-logistic-regression/
+https://www.fromthegenesis.com/pros-and-cons-of-k-nearest-neighbors/
+https://en.wikipedia.org/wiki/Decision_tree_learning
+https://www.quora.com/What-are-the-advantages-and-disadvantages-for-a-random-forest-algorithm
+https://towardsdatascience.com/hype-disadvantages-of-neural-networks-6af04904ba5b
+https://www.researchgate.net/publication/226607293_Partial_Least_Squares_PLS_Its_Strengths_and_Limitations
+
+
+
